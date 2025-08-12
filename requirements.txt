@@ -9,4 +9,11 @@ google-auth
 google-auth-oauthlib
 google-auth-httplib2
 plotly
+python-docx
+scikit-learn
+sentence-transformers
+fuzzywuzzy
+python-Levenshtein
+PyPDF2
+
 
