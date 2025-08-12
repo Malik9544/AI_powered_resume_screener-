@@ -15,5 +15,8 @@ sentence-transformers
 fuzzywuzzy
 python-Levenshtein
 PyPDF2
+pytesseract
+Pillow
+
 
 
