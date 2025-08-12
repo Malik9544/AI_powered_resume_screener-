@@ -1,31 +1,29 @@
 import os
-import io
+import json
+import base64
 import pdfplumber
 import pandas as pd
 import streamlit as st
-import plotly.graph_objects as go
+from io import BytesIO
 from sentence_transformers import SentenceTransformer, util
-from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
-import base64
+from google.oauth2.credentials import Credentials
 
-# ===============================
-# CONFIG
-# ===============================
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
-MODEL = SentenceTransformer('all-MiniLM-L6-v2')
-
-# Streamlit UI settings
+# ------------------ CONFIG ------------------
 st.set_page_config(page_title="AI Resume Screener", page_icon="📄", layout="wide")
-st.title("📄 AI-Powered Resume Screener")
-st.write("Automated Resume Screening with NLP + Gmail API")
 
-# ===============================
-# GMAIL API HELPER FUNCTIONS
-# ===============================
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# ------------------ GMAIL AUTH ------------------
 def gmail_authenticate():
+    creds_json = st.secrets["GMAIL_CREDENTIALS"]  # Load from Streamlit Secrets
+    with open("gmail_credentials.json", "w") as f:
+        f.write(creds_json)
+
     creds = None
     if os.path.exists("token.json"):
         creds = Credentials.from_authorized_user_file("token.json", SCOPES)
@@ -33,85 +31,67 @@ def gmail_authenticate():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "client_secret_1312624875-ppqs8a1ufg2ed6s7f6p0ltn85pbd3kbh.apps.googleusercontent.com.json", SCOPES
-            )
+            flow = InstalledAppFlow.from_client_secrets_file("gmail_credentials.json", SCOPES)
             creds = flow.run_local_server(port=0)
         with open("token.json", "w") as token:
             token.write(creds.to_json())
+
     return build('gmail', 'v1', credentials=creds)
 
-def fetch_pdfs_from_gmail(service, max_results=5):
-    results = service.users().messages().list(userId='me', maxResults=max_results).execute()
-    messages = results.get('messages', [])
-    pdf_files = []
-    for msg in messages:
-        msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
-        for part in msg_data.get('payload', {}).get('parts', []):
-            if part.get('filename', '').lower().endswith('.pdf'):
-                att_id = part['body']['attachmentId']
-                att = service.users().messages().attachments().get(userId='me', messageId=msg['id'], id=att_id).execute()
-                file_data = base64.urlsafe_b64decode(att['data'])
-                file_path = os.path.join("temp_resumes", part['filename'])
-                os.makedirs("temp_resumes", exist_ok=True)
-                with open(file_path, "wb") as f:
-                    f.write(file_data)
-                pdf_files.append(file_path)
-    return pdf_files
+# ------------------ FETCH RESUMES FROM GMAIL ------------------
+def fetch_resumes_from_gmail():
+    service = gmail_authenticate()
+    resumes = []
 
-# ===============================
-# RESUME PROCESSING
-# ===============================
-def extract_text_from_pdf(pdf_path):
-    text = ""
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text += page.extract_text() or ""
-    return text
+    try:
+        results = service.users().messages().list(userId='me', q="has:attachment filename:pdf").execute()
+        messages = results.get('messages', [])
+        for msg in messages:
+            msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
+            for part in msg_data['payload'].get('parts', []):
+                if part['filename'].endswith('.pdf'):
+                    att_id = part['body']['attachmentId']
+                    att = service.users().messages().attachments().get(userId='me', messageId=msg['id'], id=att_id).execute()
+                    file_data = base64.urlsafe_b64decode(att['data'])
+                    resumes.append({"filename": part['filename'], "file": BytesIO(file_data)})
+    except HttpError as error:
+        st.error(f"An error occurred: {error}")
 
-def score_resume(resume_text, job_description):
-    resume_emb = MODEL.encode(resume_text, convert_to_tensor=True)
-    job_emb = MODEL.encode(job_description, convert_to_tensor=True)
-    similarity = util.cos_sim(resume_emb, job_emb).item()
-    return round(similarity * 100, 2)
+    return resumes
 
-def visualize_scores(scores_dict):
-    names = list(scores_dict.keys())
-    scores = list(scores_dict.values())
-    fig = go.Figure(data=[go.Bar(x=names, y=scores, text=scores, textposition='auto')])
-    fig.update_layout(title="Resume Match Scores", xaxis_title="Candidate", yaxis_title="Match %")
-    st.plotly_chart(fig, use_container_width=True)
+# ------------------ RESUME PARSING ------------------
+def extract_text_from_pdf(file):
+    with pdfplumber.open(file) as pdf:
+        return " ".join(page.extract_text() or "" for page in pdf.pages)
 
-# ===============================
-# UI
-# ===============================
-job_description = st.text_area("📌 Enter Job Description", height=150)
+# ------------------ MATCHING ------------------
+def calculate_similarity(resume_text, jd_text):
+    resume_emb = model.encode(resume_text, convert_to_tensor=True)
+    jd_emb = model.encode(jd_text, convert_to_tensor=True)
+    return float(util.pytorch_cos_sim(resume_emb, jd_emb)[0][0])
 
-option = st.radio("Select Resume Source:", ("📂 Manual Upload", "📧 Fetch from Gmail"))
+# ------------------ UI ------------------
+st.title("📄 AI-Powered Resume Screener")
 
-resumes_texts = {}
-if option == "📂 Manual Upload":
-    uploaded_files = st.file_uploader("Upload PDF Resumes", type=["pdf"], accept_multiple_files=True)
-    if uploaded_files and st.button("Process Resumes"):
-        for file in uploaded_files:
-            resume_text = extract_text_from_pdf(file)
-            resumes_texts[file.name] = resume_text
+jd_text = st.text_area("📝 Job Description", placeholder="Paste the job description here...")
 
-elif option == "📧 Fetch from Gmail":
-    num_files = st.slider("Number of resumes to fetch", 1, 20, 5)
-    if st.button("Fetch from Gmail"):
-        service = gmail_authenticate()
-        pdf_paths = fetch_pdfs_from_gmail(service, num_files)
-        for path in pdf_paths:
-            resumes_texts[os.path.basename(path)] = extract_text_from_pdf(path)
-        st.success(f"Fetched {len(pdf_paths)} PDF resumes from Gmail!")
+uploaded_files = st.file_uploader("📂 Upload PDF resumes", type=["pdf"], accept_multiple_files=True)
 
-# ===============================
-# SCORING & RESULTS
-# ===============================
-if resumes_texts and job_description:
-    scores = {name: score_resume(text, job_description) for name, text in resumes_texts.items()}
-    st.subheader("📊 Match Results")
-    visualize_scores(scores)
-    best_candidate = max(scores, key=scores.get)
-    st.success(f"🏆 Best Match: **{best_candidate}** ({scores[best_candidate]}%)")
+if st.button("📥 Fetch from Gmail"):
+    gmail_resumes = fetch_resumes_from_gmail()
+    for r in gmail_resumes:
+        uploaded_files.append(r["file"])
+
+if jd_text and uploaded_files:
+    results = []
+    for file in uploaded_files:
+        resume_text = extract_text_from_pdf(file)
+        score = calculate_similarity(resume_text, jd_text) * 100
+        results.append({"filename": file.name, "score": score})
+
+    df = pd.DataFrame(results).sort_values(by="score", ascending=False)
+    st.subheader("📊 Resume Match Scores")
+    st.dataframe(df)
+
+    best_match = df.iloc[0]
+    st.success(f"🏆 Best Match: {best_match['filename']} ({best_match['score']:.2f}%)")
