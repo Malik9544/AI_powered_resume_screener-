@@ -4,3 +4,4 @@ python-docx
 pandas
 sentence-transformers
 torch
+plotly
