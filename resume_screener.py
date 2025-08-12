@@ -22,7 +22,7 @@ DEFAULT_REDIRECT_URI = "https://mxdkvunyvferw2lfjeihzr.streamlit.app"  # <- your
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 st.set_page_config(page_title="AI Resume Screener", page_icon="📄", layout="wide")
-st.title("📄 AI Resume Screener — Manual + Gmail fetch (cloud-friendly)")
+st.title("AI-Powered Resume Screener")
 
 # ---------------- Model (cached) ----------------
 @st.cache_resource(show_spinner=False)
@@ -246,4 +246,5 @@ if results:
 
 # small helpful note
 st.info("Tip: If you authorize Gmail, Google will redirect back to this app URL with a code. Ensure your OAuth client in Google Cloud has the app URL set as a redirect URI (no trailing slash).")
+
 
