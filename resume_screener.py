@@ -78,12 +78,10 @@ def ensure_authorized():
     if flow is None:
         return None
 
-    # If Google redirected back with a code, exchange it
-    params = st.experimental_get_query_params()
-    code = None
-    if "code" in params:
-        # st.experimental_get_query_params returns lists
-        code = params["code"][0]
+  # If Google redirected back with a code, exchange it
+params = st.query_params
+code = params.get("code")
+
 
     if code:
         try:
@@ -257,3 +255,4 @@ if results:
 
 # small helpful note
 st.info("Tip: If you authorize Gmail, Google will redirect back to this app URL with a code. Ensure your OAuth client in Google Cloud has the app URL set as a redirect URI (no trailing slash).")
+
