@@ -64,13 +64,7 @@ def build_flow():
     return flow
 
 def ensure_authorized():
-    """
-    Ensure we have valid credentials. If not, show auth link.
-    If Google redirected back with a code, exchange it here.
-    Returns Credentials or None.
-    """
     creds = load_saved_credentials()
-    # if credentials exist and valid, return
     if creds and creds.valid:
         return creds
 
@@ -78,29 +72,26 @@ def ensure_authorized():
     if flow is None:
         return None
 
-  # If Google redirected back with a code, exchange it
-params = st.query_params
-code = params.get("code")
-
+    # Get query params from URL
+    params = st.query_params
+    code = params.get("code")
 
     if code:
         try:
             flow.fetch_token(code=code)
             creds = flow.credentials
             save_credentials(creds)
-            # clear code from URL so user won't see it
-            st.experimental_set_query_params()
+            st.query_params.clear()
             st.success("✅ Google authorization complete — you can now fetch resumes.")
             return creds
         except Exception as e:
             st.error(f"Failed to exchange code for token: {e}")
             return None
     else:
-        # No code yet. Show auth link for user to click and complete OAuth.
         auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
         st.info("To fetch resumes from Gmail you must authorize this app to read your mailbox (read-only).")
         st.markdown(f"[🔑 Click here to authorize Gmail access]({auth_url})")
-        st.caption("After authorizing, Google will redirect back to this app and the flow will complete automatically.")
+        st.caption("After authorizing, Google will redirect back here automatically.")
         return None
 
 def fetch_pdf_attachments_from_gmail(creds, max_messages=10):
