@@ -223,15 +223,27 @@ if fetch_from_gmail:
                             st.success(f"Fetched and scored {len(attachments)} PDF(s) from Gmail.")
 
 
-# Results display (if any)
+# --- Existing Results Display (unchanged above this) ---
 if results:
     df = pd.DataFrame(results).sort_values(by="score", ascending=False).reset_index(drop=True)
     st.subheader("Match results")
     st.dataframe(df)
 
-    # Plot top results
-    fig = go.Figure(go.Bar(x=df["name"], y=df["score"], text=df["score"], textposition="auto"))
-    fig.update_layout(title="Resume Match Scores", xaxis_title="Candidate", yaxis_title="Match %", height=420)
+    # Improved Candidate Score Bar Chart
+    fig = go.Figure(go.Bar(
+        x=df["score"],
+        y=df["name"],
+        orientation="h",
+        text=df["score"],
+        textposition="auto",
+        marker=dict(color=df["score"], colorscale="RdYlGn", cmin=0, cmax=100)
+    ))
+    fig.update_layout(
+        title="Resume Match Scores",
+        xaxis_title="Match %",
+        yaxis_title="Candidate",
+        height=420
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     # Shortlist section
@@ -241,10 +253,31 @@ if results:
         st.table(shortlisted)
         top = shortlisted.iloc[0]
         st.success(f"Top shortlisted candidate: {top['name']} — {top['score']}%")
+
+        # ✅ Download shortlist as CSV
+        csv_data = shortlisted.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="⬇️ Download Shortlisted Candidates (CSV)",
+            data=csv_data,
+            file_name='shortlisted_candidates.csv',
+            mime='text/csv'
+        )
+
+        # Skills Overview (dummy example since skills not extracted yet)
+        fig2 = go.Figure(go.Bar(
+            x=shortlisted["name"],
+            y=shortlisted["score"],
+            text=shortlisted["score"],
+            textposition="auto",
+            marker=dict(color='skyblue')
+        ))
+        fig2.update_layout(
+            title="Shortlisted Candidates Score Overview",
+            xaxis_title="Candidate",
+            yaxis_title="Match %",
+            height=320
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
     else:
         st.warning("No candidates met the threshold.")
-
-# small helpful note
-st.info("Tip: If you authorize Gmail, Google will redirect back to this app URL with a code. Ensure your OAuth client in Google Cloud has the app URL set as a redirect URI (no trailing slash).")
-
-
