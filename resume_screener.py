@@ -10,15 +10,15 @@ from sentence_transformers import SentenceTransformer, util
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from PyPDF2 import PdfReader
+from pdf2image import convert_from_bytes
+import pytesseract
+from PIL import Image
 
 # ---------------- CONFIG ----------------
-# Change these only if you renamed files or want a different redirect URL
 CLIENT_SECRET_FILE = "client_secret.json"
 TOKEN_FILE = "token.json"
-
-# If you put redirect_uri in Streamlit Secrets (recommended), use it:
 DEFAULT_REDIRECT_URI = "https://mxdkvunyvferw2lfjeihzr.streamlit.app"  # <- your app URL
-
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 st.set_page_config(page_title="AI Resume Screener", page_icon="📄", layout="wide")
@@ -31,9 +31,8 @@ def load_model():
 
 MODEL = load_model()
 
-# ---------------- Helpers: Gmail auth & fetch ----------------
+# ---------------- Gmail auth helpers ----------------
 def get_redirect_uri():
-    # prefer user-supplied secret, else default
     if "redirect_uri" in st.secrets:
         return st.secrets["redirect_uri"]
     return DEFAULT_REDIRECT_URI
@@ -53,7 +52,7 @@ def save_credentials(creds):
 
 def build_flow():
     if not os.path.exists(CLIENT_SECRET_FILE):
-        st.error(f"Missing `{CLIENT_SECRET_FILE}` in app folder. Upload it (OAuth client JSON).")
+        st.error(f"Missing `{CLIENT_SECRET_FILE}` in app folder.")
         return None
     redirect_uri = get_redirect_uri()
     flow = Flow.from_client_secrets_file(
@@ -67,15 +66,11 @@ def ensure_authorized():
     creds = load_saved_credentials()
     if creds and creds.valid:
         return creds
-
     flow = build_flow()
     if flow is None:
         return None
-
-    # Get query params from URL
     params = st.query_params
     code = params.get("code")
-
     if code:
         try:
             flow.fetch_token(code=code)
@@ -89,23 +84,22 @@ def ensure_authorized():
             return None
     else:
         auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
-        st.info("To fetch resumes from Gmail you must authorize this app to read your mailbox (read-only).")
         st.markdown(f"[🔑 Click here to authorize Gmail access]({auth_url})")
-        st.caption("After authorizing, Google will redirect back here automatically.")
         return None
 
-def fetch_pdf_attachments_from_gmail(creds, max_messages=10):
-    """
-    Returns list of dicts: {'name': filename, 'bytes': <bytes>}
-    """
+def fetch_pdf_attachments_from_gmail(creds, max_messages=10, days_back=30, strict=False):
     service = build("gmail", "v1", credentials=creds)
+    query = f"has:attachment filename:pdf newer_than:{days_back}d"
+    if strict:
+        query += " (resume OR cv)"
     try:
-        resp = service.users().messages().list(userId="me", maxResults=max_messages, q="has:attachment filename:pdf").execute()
+        resp = service.users().messages().list(
+            userId="me", maxResults=max_messages, q=query
+        ).execute()
         messages = resp.get("messages", []) or []
     except Exception as e:
         st.error(f"Gmail list error: {e}")
         return []
-
     attachments = []
     for msg in messages:
         try:
@@ -118,166 +112,133 @@ def fetch_pdf_attachments_from_gmail(creds, max_messages=10):
                     att_id = body.get("attachmentId")
                     if not att_id:
                         continue
-                    att = service.users().messages().attachments().get(userId="me", messageId=msg["id"], id=att_id).execute()
+                    att = service.users().messages().attachments().get(
+                        userId="me", messageId=msg["id"], id=att_id
+                    ).execute()
                     data = base64.urlsafe_b64decode(att.get("data", ""))
                     attachments.append({"name": filename, "bytes": data})
         except Exception as e:
-            # keep going if one message fails
-            st.warning(f"Warning: failed to process one message: {e}")
+            st.warning(f"Failed to process one message: {e}")
             continue
     return attachments
 
-# ---------------- Resume parsing & scoring ----------------
+# ---------------- Resume parsing & OCR ----------------
 def extract_text_from_pdf_bytes(pdf_bytes):
-    # pdfplumber works with BytesIO
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             pages = [p.extract_text() or "" for p in pdf.pages]
-            return "\n".join(pages)
+            text = "\n".join(pages)
+            if text.strip():
+                return text
     except Exception:
-        # fallback: empty text (you can add OCR here later)
+        pass
+    # Fallback to OCR
+    try:
+        images = convert_from_bytes(pdf_bytes)
+        text = ""
+        for img in images:
+            text += pytesseract.image_to_string(img)
+        return text
+    except Exception:
         return ""
 
 def calculate_semantic_score(resume_text, job_description):
     if not resume_text.strip():
         return 0.0
-    # encode both, compute cosine
     emb_resume = MODEL.encode(resume_text, convert_to_tensor=True)
     emb_jd = MODEL.encode(job_description, convert_to_tensor=True)
     score = util.pytorch_cos_sim(emb_resume, emb_jd).item()
     return round(float(score) * 100, 2)
 
 # ---------------- UI ----------------
-st.markdown("**Paste the job description**, then either upload resumes or fetch from Gmail. Both buttons are available below.")
+st.markdown("**Paste the job description**, then either upload resumes or fetch from Gmail.")
 
-job_description = st.text_area("Job description (paste full JD)", height=180)
-
+job_description = st.text_area("Job description", height=180)
 threshold = st.slider("Minimum match % to shortlist", 0, 100, 75)
 
-# File upload area (manual)
+# Manual upload
 st.subheader("Manual resumes")
-uploaded_files = st.file_uploader("Upload one or more PDF resumes", type=["pdf"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PDF resumes", type=["pdf"], accept_multiple_files=True)
 analyze_uploaded = st.button("Analyze uploaded resumes")
 
-# Gmail area (always visible)
+# Gmail fetch
 st.subheader("Gmail fetch")
-st.markdown("Fetch recent PDF attachments from your Gmail (read-only).")
-# Offer how many to fetch
-num_to_fetch = st.number_input("Max number of messages to scan (recent)", min_value=1, max_value=50, value=10, step=1)
+days_back = st.selectbox("Fetch resumes from last…", [7, 30, 90], index=1)
+strict_filter = st.checkbox("Strict filtering (only resumes/CVs)", value=True)
+num_to_fetch = st.number_input("Max messages to scan", min_value=1, max_value=50, value=10, step=1)
 fetch_from_gmail = st.button("Fetch from Gmail")
 
-results = []  # list of dicts {'name','score'}
+results = []
 
-# Manual analysis action
+# Manual analysis
 if analyze_uploaded:
     if not job_description.strip():
-        st.error("Please paste a job description before analyzing.")
+        st.error("Paste job description first.")
     elif not uploaded_files:
-        st.error("Please upload at least one PDF resume.")
+        st.error("Upload at least one resume.")
     else:
-        with st.spinner("Scoring uploaded resumes..."):
+        with st.spinner("Scoring resumes..."):
             for f in uploaded_files:
-                try:
-                    pdf_bytes = f.read()
-                    resume_text = extract_text_from_pdf_bytes(pdf_bytes)
-                    score = calculate_semantic_score(resume_text, job_description)
-                    results.append({"name": getattr(f, "name", "Uploaded PDF"), "score": score})
-                except Exception as e:
-                    st.warning(f"Failed to process {getattr(f,'name','uploaded')}: {e}")
+                pdf_bytes = f.read()
+                resume_text = extract_text_from_pdf_bytes(pdf_bytes)
+                score = calculate_semantic_score(resume_text, job_description)
+                results.append({"name": f.name, "score": score})
 
-# Gmail fetch action
+# Gmail analysis
 if fetch_from_gmail:
     if not job_description.strip():
-        st.error("Please paste a job description before fetching + analyzing.")
+        st.error("Paste job description first.")
     else:
         creds = load_saved_credentials()
         if creds and creds.valid:
-            # direct fetch
             with st.spinner("Fetching PDFs from Gmail..."):
-                attachments = fetch_pdf_attachments_from_gmail(creds, max_messages=num_to_fetch)
-                if not attachments:
-                    st.info("No PDF attachments found in recent messages.")
-                else:
-                    with st.spinner("Scoring fetched resumes..."):
+                attachments = fetch_pdf_attachments_from_gmail(
+                    creds, max_messages=num_to_fetch, days_back=days_back, strict=strict_filter
+                )
+                if attachments:
+                    with st.spinner("Scoring resumes..."):
                         for att in attachments:
                             txt = extract_text_from_pdf_bytes(att["bytes"])
                             sc = calculate_semantic_score(txt, job_description)
                             results.append({"name": att["name"], "score": sc})
-                        st.success(f"Fetched and scored {len(attachments)} PDF(s) from Gmail.")
+                        st.success(f"Fetched and scored {len(attachments)} PDF(s).")
+                else:
+                    st.info("No matching resumes found.")
         else:
-            # not authorized yet (or token expired) -> present auth link + wait for redirect
-            st.info("You must authorize the app to read your Gmail (read-only).")
             creds2 = ensure_authorized()
             if creds2:
-                # After authorization completes, automatically fetch
-                with st.spinner("Fetching PDFs from Gmail (post-auth)..."):
-                    attachments = fetch_pdf_attachments_from_gmail(creds2, max_messages=num_to_fetch)
-                    if not attachments:
-                        st.info("No PDF attachments found in recent messages.")
-                    else:
-                        with st.spinner("Scoring fetched resumes..."):
+                with st.spinner("Fetching PDFs from Gmail..."):
+                    attachments = fetch_pdf_attachments_from_gmail(
+                        creds2, max_messages=num_to_fetch, days_back=days_back, strict=strict_filter
+                    )
+                    if attachments:
+                        with st.spinner("Scoring resumes..."):
                             for att in attachments:
                                 txt = extract_text_from_pdf_bytes(att["bytes"])
                                 sc = calculate_semantic_score(txt, job_description)
                                 results.append({"name": att["name"], "score": sc})
-                            st.success(f"Fetched and scored {len(attachments)} PDF(s) from Gmail.")
+                        st.success(f"Fetched and scored {len(attachments)} PDF(s).")
 
-
-# --- Existing Results Display (unchanged above this) ---
+# Results
 if results:
     df = pd.DataFrame(results).sort_values(by="score", ascending=False).reset_index(drop=True)
     st.subheader("Match results")
     st.dataframe(df)
 
-    # Improved Candidate Score Bar Chart
-    fig = go.Figure(go.Bar(
-        x=df["score"],
-        y=df["name"],
-        orientation="h",
-        text=df["score"],
-        textposition="auto",
-        marker=dict(color=df["score"], colorscale="RdYlGn", cmin=0, cmax=100)
-    ))
-    fig.update_layout(
-        title="Resume Match Scores",
-        xaxis_title="Match %",
-        yaxis_title="Candidate",
-        height=420
-    )
+    # Plot results
+    fig = go.Figure(go.Bar(x=df["name"], y=df["score"], text=df["score"], textposition="auto"))
+    fig.update_layout(title="Resume Match Scores", xaxis_title="Candidate", yaxis_title="Match %", height=420)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Shortlist section
+    # Shortlist
     shortlisted = df[df["score"] >= threshold]
-    st.subheader(f"Shortlisted (score ≥ {threshold}%) — {len(shortlisted)} candidate(s)")
+    st.subheader(f"Shortlisted (≥ {threshold}%) — {len(shortlisted)}")
     if not shortlisted.empty:
         st.table(shortlisted)
+        # Download button
+        csv = shortlisted.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Download Shortlisted CSV", csv, "shortlisted.csv", "text/csv")
         top = shortlisted.iloc[0]
-        st.success(f"Top shortlisted candidate: {top['name']} — {top['score']}%")
-
-        # ✅ Download shortlist as CSV
-        csv_data = shortlisted.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="⬇️ Download Shortlisted Candidates (CSV)",
-            data=csv_data,
-            file_name='shortlisted_candidates.csv',
-            mime='text/csv'
-        )
-
-        # Skills Overview (dummy example since skills not extracted yet)
-        fig2 = go.Figure(go.Bar(
-            x=shortlisted["name"],
-            y=shortlisted["score"],
-            text=shortlisted["score"],
-            textposition="auto",
-            marker=dict(color='skyblue')
-        ))
-        fig2.update_layout(
-            title="Shortlisted Candidates Score Overview",
-            xaxis_title="Candidate",
-            yaxis_title="Match %",
-            height=320
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
+        st.success(f"Top candidate: {top['name']} — {top['score']}%")
     else:
         st.warning("No candidates met the threshold.")
