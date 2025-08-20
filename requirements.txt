@@ -17,6 +17,7 @@ python-Levenshtein
 PyPDF2
 pytesseract
 Pillow
-
-
+pdf2image
+pytesseract
+transformers
 
